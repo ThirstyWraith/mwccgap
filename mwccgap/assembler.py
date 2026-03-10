@@ -51,8 +51,10 @@ class Assembler:
                 stderr=subprocess.PIPE,
             ) as process:
                 in_bytes = asm_filepath.read_bytes()
+                # add .set noat .set noreorder to individual function .s files
+                in_bytes = b".set noat\n.set noreorder\n" + in_bytes
                 if self.macro_inc_path and self.macro_inc_path.is_file():
-                    in_bytes = self.macro_inc_path.read_bytes() + in_bytes
+                    in_bytes = self.macro_inc_path.read_bytes() + b"\n" + in_bytes
 
                 stdout, stderr = process.communicate(input=in_bytes)
 

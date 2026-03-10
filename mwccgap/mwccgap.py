@@ -117,15 +117,24 @@ def process_c_file(
         has_text = len(asm_text) > 0
 
         if has_text:
-            # identify the .text section for this function
-            for text_section_index, text_section in enumerate(compiled_elf.sections):
-                if (
-                    isinstance(text_section, TextSection)
-                    and text_section.function_name == f"{FUNCTION_PREFIX}{function}"
-                ):
+            # identify the .text section and exact byte offset for this function
+            target_sym = None
+            for sym in compiled_elf.symtab.symbols:
+                if sym.name == function or sym.name == f"{FUNCTION_PREFIX}{function}":
+                    target_sym = sym
                     break
-            else:
-                raise Exception(f"{function} not found in {c_file}")
+            
+            if target_sym is None:
+                raise Exception(f"Function symbol {function} not found in compiled {c_file}")
+
+            text_section_index = target_sym.st_shndx
+            text_section = compiled_elf.sections[text_section_index]
+            target_offset = target_sym.st_value
+            compiled_function_length = target_sym.st_size
+            
+            # Fallback if the compiler didn't set the symbol size properly
+            if compiled_function_length == 0:
+                compiled_function_length = len(asm_text)
 
             # assumption is that .rodata will immediately follow the .text section
             rodata_section_indices = []
@@ -155,14 +164,23 @@ def process_c_file(
             rodata_section_indices = [idx]
 
         if has_text:
-            # transplant .text section data from assembled object
-            compiled_function_length = len(text_section.data)
+            # GNU-AS pads the end of files to 16-byte boundaries. 
+            # If the assembly is larger than the gap, verify the excess is just zero-padding and strip it.
+            if len(asm_text) > compiled_function_length:
+                excess = asm_text[compiled_function_length:]
+                assert excess == b'\x00' * len(excess), f"Assembly for {function} is larger than the gap, and excess bytes are not zero-padding!"
+                asm_text = asm_text[:compiled_function_length]
 
-            assert (
-                len(asm_text) >= compiled_function_length
-            ), f"Not enough assembly to fill {function} in {c_file}"
+            # Pad asm_text with NOPs (0x00) if it is somehow smaller than the MWCC gap
+            padded_asm = bytearray(asm_text)
+            if len(padded_asm) < compiled_function_length:
+                padded_asm.extend(b'\x00' * (compiled_function_length - len(padded_asm)))
 
-            text_section.data = asm_text[:compiled_function_length]
+            # Splice it precisely into the target_offset
+            new_data = bytearray(text_section.data)
+            end_offset = target_offset + compiled_function_length
+            new_data[target_offset:end_offset] = padded_asm[:compiled_function_length]
+            text_section.data = bytes(new_data)
 
         if num_rodata_symbols > 0:
             assert (
@@ -211,6 +229,10 @@ def process_c_file(
                 relocation_record.sh_info = rodata_section_indices[0]
 
             for relocation in relocation_record.relocations:
+                if has_text and i == 0:
+                    # Shift relocation offset to match the function's deep position in the monolithic section
+                    relocation.r_offset += target_offset
+
                 symbol = assembled_elf.symtab.symbols[relocation.symbol_index]
 
                 if symbol.bind == 0:
@@ -228,7 +250,18 @@ def process_c_file(
                     # repoint .rodata reloc to .text section
                     symbol.st_shndx = text_section_index
 
-            compiled_elf.add_section(relocation_record)
+            # Monolithic Fix: Merge relocations instead of appending duplicate sections
+            existing_relocs = [
+                r for r in compiled_elf.get_relocations() 
+                if r.sh_info == relocation_record.sh_info
+            ]
+            
+            if existing_relocs:
+                # If a relocation section already exists for this target, extend its array
+                existing_relocs[0].relocations.extend(relocation_record.relocations)
+            else:
+                # If none exists, it is safe to add the new section
+                compiled_elf.add_section(relocation_record)
 
         new_rodata_relocs = []
         if local_syms_inserted > 0:
