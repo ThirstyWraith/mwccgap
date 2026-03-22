@@ -121,8 +121,9 @@ def process_c_file(
             target_sym = None
             for sym in compiled_elf.symtab.symbols:
                 if sym.name == function or sym.name == f"{FUNCTION_PREFIX}{function}":
-                    target_sym = sym
-                    break
+                    if sym.st_shndx != 0:
+                        target_sym = sym
+                        break
             
             if target_sym is None:
                 raise Exception(f"Function symbol {function} not found in compiled {c_file}")
