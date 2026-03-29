@@ -162,6 +162,7 @@ class Preprocessor:
 
         if nops_needed > 0:
             nops = nops_needed * ["nop"]
+            c_lines.extend([f"asm void {function_name}();"])
             c_lines.extend([f"asm void {function_name}() {{", *nops, "}"])
 
         for symbol in rodata_entries.values():
